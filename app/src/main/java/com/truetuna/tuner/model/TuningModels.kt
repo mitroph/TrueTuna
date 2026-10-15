@@ -50,6 +50,28 @@ enum class TuningMode { CHROMATIC, GUITAR }
 enum class TETMode { TET_12, TET_24 }
 enum class Language { RU, UA, EN }
 
+/** Which physical instrument is selected in Guitar guided mode. */
+enum class Instrument {
+    GUITAR_6,   // 6-string guitar  (existing presets)
+    BASS_4,     // 4-string bass
+    BASS_5,     // 5-string bass
+    UKULELE,    // Soprano / Concert ukulele
+    UKULELE_TENOR, // Tenor ukulele
+    UKULELE_BARITONE, // Baritone ukulele
+    VIOLIN,     // Violin (4 strings)
+    CELLO;      // Cello  (4 strings)
+
+    /** Number of strings on this instrument. */
+    val stringCount: Int get() = when (this) {
+        GUITAR_6 -> 6
+        BASS_4, UKULELE, UKULELE_TENOR, UKULELE_BARITONE, VIOLIN, CELLO -> 4
+        BASS_5 -> 5
+    }
+}
+
+/** Tuner visualization display mode. */
+enum class DisplayMode { NEEDLE, STROBE }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PITCH RESULT — what the ViewModel exposes to the UI
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,7 +183,43 @@ data class GuitarString(
 data class GuitarTuning(
     val name: String,
     val categoryKey: String,
-    val strings: List<GuitarString>
+    val strings: List<GuitarString>,
+    val instrument: Instrument = Instrument.GUITAR_6,
+    /** True when this tuning was created by the user and stored locally. */
+    val isCustom: Boolean = false
+)
+
+/**
+ * Apply capo offset to a tuning: raises each string by [capoFret] semitones.
+ * The returned tuning strings have updated note names, octaves, and frequencies.
+ */
+fun GuitarTuning.withCapo(capoFret: Int, a4Hz: Float = 440f): GuitarTuning {
+    if (capoFret == 0) return this
+    val newStrings = strings.map { s ->
+        val newSemitone = s.semitone + capoFret
+        val (newNote, newOctave) = semitoneToNoteOctave(newSemitone)
+        GuitarString(
+            stringNumber = s.stringNumber,
+            noteName = newNote,
+            octave = newOctave,
+            semitone = newSemitone,
+            frequencyHz = semitoneToFrequency(newSemitone, a4Hz)
+        )
+    }
+    return copy(strings = newStrings)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// METRONOME STATE
+// ─────────────────────────────────────────────────────────────────────────────
+
+data class MetronomeState(
+    val isRunning: Boolean = false,
+    val bpm: Int = 100,                   // 40–240 BPM
+    val beatsPerBar: Int = 4,             // time-signature numerator: 2, 3, 4
+    val currentBeat: Int = 0,             // 0-based within bar
+    val isSoundEnabled: Boolean = true,   // audio click
+    val isVisualEnabled: Boolean = true   // visual flash
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

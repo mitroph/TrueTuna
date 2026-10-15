@@ -2,6 +2,7 @@ package com.truetuna.tuner.ui.screen
 
 import android.Manifest
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -60,6 +62,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
@@ -70,9 +73,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.truetuna.tuner.data.TuningRepository
+import com.truetuna.tuner.model.DisplayMode
+import com.truetuna.tuner.model.GuitarString
+import com.truetuna.tuner.model.GuitarTuning
+import com.truetuna.tuner.model.Instrument
 import com.truetuna.tuner.model.Language
 import com.truetuna.tuner.model.TETMode
 import com.truetuna.tuner.model.TuningMode
+import com.truetuna.tuner.model.withCapo
 import com.truetuna.tuner.ui.Strings
 import com.truetuna.tuner.ui.theme.AmberWarm
 import com.truetuna.tuner.ui.theme.CardSurface
@@ -88,6 +96,18 @@ import com.truetuna.tuner.ui.theme.TextPrimary
 import com.truetuna.tuner.ui.theme.TextSecondary
 import com.truetuna.tuner.viewmodel.TunerUiState
 import com.truetuna.tuner.viewmodel.TunerViewModel
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Tab
+import androidx.compose.runtime.withFrameNanos
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -133,6 +153,11 @@ fun TunerScreen(viewModel: TunerViewModel) {
 
     var showSettings by remember { mutableStateOf(false) }
     var showTuningPicker by remember { mutableStateOf(false) }
+    var showMetronomeBar by remember { mutableStateOf(false) }
+    var showCapoPicker by remember { mutableStateOf(false) }
+    var showCustomTuningDialog by remember { mutableStateOf(false) }
+
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     Box(
         modifier = Modifier
@@ -144,7 +169,8 @@ fun TunerScreen(viewModel: TunerViewModel) {
                 state = state,
                 onRequest = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }
             )
-        } else {
+        } else if (isLandscape) {
+            // ── Landscape dual-column layout (rack / bench tuner style) ────────
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -153,9 +179,16 @@ fun TunerScreen(viewModel: TunerViewModel) {
                     .padding(horizontal = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // ── Top bar ────────────────────────────────────────────────
                 TopBar(
                     state = state,
+                    isMetronomeOpen = showMetronomeBar || state.metronome.isRunning,
+                    onToggleMetronome = { showMetronomeBar = !showMetronomeBar },
+                    onToggleTone = { viewModel.playReferenceTone() },
+                    onToggleDisplayMode = {
+                        viewModel.setDisplayMode(
+                            if (state.displayMode == DisplayMode.NEEDLE) DisplayMode.STROBE else DisplayMode.NEEDLE
+                        )
+                    },
                     onSettingsClick = { showSettings = true },
                     onLanguageToggle = {
                         val next = when (state.language) {
@@ -167,6 +200,156 @@ fun TunerScreen(viewModel: TunerViewModel) {
                     }
                 )
 
+                AnimatedVisibility(
+                    visible = showMetronomeBar || state.metronome.isRunning,
+                    enter = expandVertically(),
+                    exit = shrinkVertically()
+                ) {
+                    MetronomeBar(
+                        metronome = state.metronome,
+                        lang = state.language,
+                        onToggle = { viewModel.toggleMetronome() },
+                        onBpmChange = { viewModel.setMetronomeBpm(it) },
+                        onBeatsChange = { viewModel.setMetronomeBeatsPerBar(it) },
+                        onSoundToggle = { viewModel.setMetronomeSound(!state.metronome.isSoundEnabled) }
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Left panel: Note Display + Strobe/Needle Gauge + Status
+                    Column(
+                        modifier = Modifier
+                            .weight(1.1f)
+                            .fillMaxHeight(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        NoteDisplay(state = state)
+                        Spacer(Modifier.height(6.dp))
+                        if (state.displayMode == DisplayMode.STROBE) {
+                            StrobeGauge(
+                                centsDeviation = state.pitchResult.centsDeviation,
+                                isInTune = state.pitchResult.isInTune,
+                                isActive = state.pitchResult.frequency > 0f,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(130.dp)
+                            )
+                        } else {
+                            TunerGauge(
+                                centsDeviation = state.pitchResult.centsDeviation,
+                                isInTune = state.pitchResult.isInTune,
+                                isActive = state.pitchResult.frequency > 0f,
+                                tetMode = state.tetMode,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(130.dp)
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        TuningStatusLabel(state = state)
+                    }
+
+                    // Right panel: Controls, String panel, and stats
+                    Column(
+                        modifier = Modifier
+                            .weight(0.9f)
+                            .fillMaxHeight()
+                            .verticalScroll(rememberScrollState()),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        ModeSwitcher(
+                            mode = state.tuningMode,
+                            lang = state.language,
+                            onModeChange = { viewModel.setTuningMode(it) }
+                        )
+
+                        if (state.tuningMode == TuningMode.GUITAR) {
+                            Spacer(Modifier.height(8.dp))
+                            GuitarPanel(
+                                state = state,
+                                onTuningPickerOpen = { showTuningPicker = true },
+                                onCapoPickerOpen = { showCapoPicker = true },
+                                onPlayTone = { viewModel.playReferenceTone() },
+                                onStringLock = { viewModel.lockString(it) }
+                            )
+                        }
+
+                        if (state.tuningMode == TuningMode.CHROMATIC) {
+                            Spacer(Modifier.height(8.dp))
+                            TETModeChip(
+                                tetMode = state.tetMode,
+                                lang = state.language,
+                                onToggle = {
+                                    viewModel.setTETMode(
+                                        if (state.tetMode == TETMode.TET_12) TETMode.TET_24 else TETMode.TET_12
+                                    )
+                                }
+                            )
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        FrequencyFooter(state = state)
+                    }
+                }
+            }
+        } else {
+            // ── Portrait single-column layout (default) ────────────────────────
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // ── Top bar ────────────────────────────────────────────────
+                TopBar(
+                    state = state,
+                    isMetronomeOpen = showMetronomeBar || state.metronome.isRunning,
+                    onToggleMetronome = { showMetronomeBar = !showMetronomeBar },
+                    onToggleTone = { viewModel.playReferenceTone() },
+                    onToggleDisplayMode = {
+                        viewModel.setDisplayMode(
+                            if (state.displayMode == DisplayMode.NEEDLE) DisplayMode.STROBE else DisplayMode.NEEDLE
+                        )
+                    },
+                    onSettingsClick = { showSettings = true },
+                    onLanguageToggle = {
+                        val next = when (state.language) {
+                            Language.RU -> Language.UA
+                            Language.UA -> Language.EN
+                            Language.EN -> Language.RU
+                        }
+                        viewModel.setLanguage(next)
+                    }
+                )
+
+                Spacer(Modifier.height(4.dp))
+
+                // ── Metronome strip (collapsible) ──────────────────────────
+                AnimatedVisibility(
+                    visible = showMetronomeBar || state.metronome.isRunning,
+                    enter = expandVertically(),
+                    exit = shrinkVertically()
+                ) {
+                    MetronomeBar(
+                        metronome = state.metronome,
+                        lang = state.language,
+                        onToggle = { viewModel.toggleMetronome() },
+                        onBpmChange = { viewModel.setMetronomeBpm(it) },
+                        onBeatsChange = { viewModel.setMetronomeBeatsPerBar(it) },
+                        onSoundToggle = { viewModel.setMetronomeSound(!state.metronome.isSoundEnabled) }
+                    )
+                }
+
                 Spacer(Modifier.height(8.dp))
 
                 // ── Mode switcher ──────────────────────────────────────────
@@ -176,23 +359,34 @@ fun TunerScreen(viewModel: TunerViewModel) {
                     onModeChange = { viewModel.setTuningMode(it) }
                 )
 
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(14.dp))
 
                 // ── Main display ───────────────────────────────────────────
                 NoteDisplay(state = state)
 
                 Spacer(Modifier.height(8.dp))
 
-                // ── Gauge ──────────────────────────────────────────────────
-                TunerGauge(
-                    centsDeviation = state.pitchResult.centsDeviation,
-                    isInTune = state.pitchResult.isInTune,
-                    isActive = state.pitchResult.frequency > 0f,
-                    tetMode = state.tetMode,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(180.dp)
-                )
+                // ── Gauge (Needle vs Strobe) ────────────────────────────────
+                if (state.displayMode == DisplayMode.STROBE) {
+                    StrobeGauge(
+                        centsDeviation = state.pitchResult.centsDeviation,
+                        isInTune = state.pitchResult.isInTune,
+                        isActive = state.pitchResult.frequency > 0f,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                    )
+                } else {
+                    TunerGauge(
+                        centsDeviation = state.pitchResult.centsDeviation,
+                        isInTune = state.pitchResult.isInTune,
+                        isActive = state.pitchResult.frequency > 0f,
+                        tetMode = state.tetMode,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                    )
+                }
 
                 Spacer(Modifier.height(8.dp))
 
@@ -206,6 +400,8 @@ fun TunerScreen(viewModel: TunerViewModel) {
                     GuitarPanel(
                         state = state,
                         onTuningPickerOpen = { showTuningPicker = true },
+                        onCapoPickerOpen = { showCapoPicker = true },
+                        onPlayTone = { viewModel.playReferenceTone() },
                         onStringLock = { viewModel.lockString(it) }
                     )
                 }
@@ -224,12 +420,12 @@ fun TunerScreen(viewModel: TunerViewModel) {
                     )
                 }
 
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(16.dp))
 
                 // ── Frequency footer ───────────────────────────────────────
                 FrequencyFooter(state = state)
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(16.dp))
             }
         }
     }
@@ -254,13 +450,46 @@ fun TunerScreen(viewModel: TunerViewModel) {
         ) {
             TuningPickerSheet(
                 state = state,
+                onSelectInstrument = { viewModel.setInstrument(it) },
                 onSelect = { tuning ->
                     viewModel.selectTuning(tuning)
                     showTuningPicker = false
                 },
+                onDeleteCustom = { viewModel.deleteCustomTuning(it) },
+                onCreateCustomClick = { showCustomTuningDialog = true },
                 onDismiss = { showTuningPicker = false }
             )
         }
+    }
+
+    // ── Capo picker bottom sheet ───────────────────────────────────────────
+    if (showCapoPicker) {
+        ModalBottomSheet(
+            onDismissRequest = { showCapoPicker = false },
+            containerColor = SurfaceDark
+        ) {
+            CapoPickerSheet(
+                currentFret = state.capoFret,
+                lang = state.language,
+                onSelectFret = { fret ->
+                    viewModel.setCapo(fret)
+                    showCapoPicker = false
+                }
+            )
+        }
+    }
+
+    // ── Custom tuning creation dialog ──────────────────────────────────────
+    if (showCustomTuningDialog) {
+        CustomTuningDialog(
+            instrument = state.selectedInstrument,
+            lang = state.language,
+            onDismiss = { showCustomTuningDialog = false },
+            onSave = { tuning ->
+                viewModel.saveCustomTuning(tuning)
+                showCustomTuningDialog = false
+            }
+        )
     }
 }
 
@@ -367,6 +596,10 @@ private fun PermissionScreen(state: TunerUiState, onRequest: () -> Unit) {
 @Composable
 private fun TopBar(
     state: TunerUiState,
+    isMetronomeOpen: Boolean,
+    onToggleMetronome: () -> Unit,
+    onToggleTone: () -> Unit,
+    onToggleDisplayMode: () -> Unit,
     onSettingsClick: () -> Unit,
     onLanguageToggle: () -> Unit
 ) {
@@ -377,40 +610,266 @@ private fun TopBar(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Language toggle
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(SurfaceVariant)
-                .clickable { onLanguageToggle() }
-                .padding(horizontal = 12.dp, vertical = 6.dp)
+        // Left: Language & Display Mode
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = state.language.name,
-                color = OrangeBright,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold
-            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(SurfaceVariant)
+                    .clickable { onLanguageToggle() }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = state.language.name,
+                    color = OrangeBright,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (state.displayMode == DisplayMode.STROBE) OrangeVibrant.copy(alpha = 0.2f) else SurfaceVariant)
+                    .clickable { onToggleDisplayMode() }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = if (state.displayMode == DisplayMode.STROBE) "STROBE" else "NEEDLE",
+                    color = if (state.displayMode == DisplayMode.STROBE) OrangeVibrant else TextSecondary,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
-        // App name
+        // Center: App name
         Text(
             text = "TrueTuna",
-            style = MaterialTheme.typography.headlineLarge,
+            style = MaterialTheme.typography.headlineMedium,
             color = OrangeVibrant,
             fontWeight = FontWeight.Black
         )
 
-        // Settings gear (drawn with Canvas)
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(SurfaceVariant)
-                .clickable { onSettingsClick() },
-            contentAlignment = Alignment.Center
+        // Right: Tone, Metronome, Settings
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("⚙", fontSize = 20.sp, color = TextSecondary)
+            // Tone generator toggle
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(if (state.isReferenceTonePlaying) OrangeVibrant else SurfaceVariant)
+                    .clickable { onToggleTone() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "🔊",
+                    fontSize = 16.sp
+                )
+            }
+
+            // Metronome toggle
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(if (isMetronomeOpen || state.metronome.isRunning) OrangeVibrant else SurfaceVariant)
+                    .clickable { onToggleMetronome() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "⏱",
+                    fontSize = 16.sp
+                )
+            }
+
+            // Settings gear
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(SurfaceVariant)
+                    .clickable { onSettingsClick() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("⚙", fontSize = 18.sp, color = TextSecondary)
+            }
+        }
+    }
+}
+
+// ─── Metronome Bar ────────────────────────────────────────────────────────────
+
+@Composable
+private fun MetronomeBar(
+    metronome: com.truetuna.tuner.model.MetronomeState,
+    lang: Language,
+    onToggle: () -> Unit,
+    onBpmChange: (Int) -> Unit,
+    onBeatsChange: (Int) -> Unit,
+    onSoundToggle: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(CardSurface)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Row 1: Beat dots & Play/Stop
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Beat indicators
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                for (b in 0 until metronome.beatsPerBar) {
+                    val isCurrent = metronome.isRunning && metronome.currentBeat == b
+                    val isAccent = b == 0
+                    val dotColor = when {
+                        isCurrent && isAccent -> NeonGreen
+                        isCurrent -> OrangeBright
+                        isAccent -> OrangeVibrant.copy(alpha = 0.5f)
+                        else -> SurfaceVariant
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(if (isCurrent) 18.dp else 14.dp)
+                            .clip(CircleShape)
+                            .background(dotColor)
+                            .border(
+                                width = if (isAccent) 2.dp else 1.dp,
+                                color = if (isCurrent) Color.White else dotColor,
+                                shape = CircleShape
+                            )
+                    )
+                }
+            }
+
+            // Right side controls: Sound toggle & Start/Stop button
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(if (metronome.isSoundEnabled) SurfaceVariant else SurfaceVariant.copy(alpha = 0.5f))
+                        .clickable { onSoundToggle() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (metronome.isSoundEnabled) "🔊" else "🔇",
+                        fontSize = 16.sp
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (metronome.isRunning) OrangeRedWarn else OrangeVibrant)
+                        .clickable { onToggle() }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (metronome.isRunning) "■ STOP" else "▶ START",
+                        color = OledBlack,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                }
+            }
+        }
+
+        // Row 2: BPM adjusters & Time signature
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // BPM adjuster buttons
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(SurfaceVariant)
+                        .clickable { onBpmChange(metronome.bpm - 5) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text("-5", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(SurfaceVariant)
+                        .clickable { onBpmChange(metronome.bpm - 1) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text("-1", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                }
+                Text(
+                    text = "${metronome.bpm} BPM",
+                    color = OrangeVibrant,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(SurfaceVariant)
+                        .clickable { onBpmChange(metronome.bpm + 1) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text("+1", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(SurfaceVariant)
+                        .clickable { onBpmChange(metronome.bpm + 5) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text("+5", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            // Time signature (2, 3, 4 beats)
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf(2, 3, 4).forEach { beats ->
+                    val isSel = metronome.beatsPerBar == beats
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (isSel) OrangeVibrant else SurfaceVariant)
+                            .clickable { onBeatsChange(beats) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "$beats/4",
+                            color = if (isSel) OledBlack else TextSecondary,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -733,6 +1192,88 @@ private fun TunerGauge(
     }
 }
 
+// ─── Strobe Gauge ─────────────────────────────────────────────────────────────
+
+@Composable
+private fun StrobeGauge(
+    centsDeviation: Float,
+    isInTune: Boolean,
+    isActive: Boolean,
+    modifier: Modifier = Modifier
+) {
+    var phase by remember { mutableStateOf(0f) }
+
+    LaunchedEffect(isActive, centsDeviation) {
+        if (!isActive) return@LaunchedEffect
+        var lastTime = System.nanoTime()
+        while (true) {
+            withFrameNanos { now ->
+                val dt = (now - lastTime) / 1_000_000_000f
+                lastTime = now
+                val speed = if (abs(centsDeviation) < 0.5f) 0f else centsDeviation * 2.2f
+                phase = (phase + speed * dt) % 1f
+                if (phase < 0f) phase += 1f
+            }
+        }
+    }
+
+    val barColor by animateColorAsState(
+        targetValue = when {
+            !isActive -> SurfaceVariant
+            isInTune -> NeonGreen
+            abs(centsDeviation) <= 15f -> AmberWarm
+            else -> OrangeRedWarn
+        },
+        animationSpec = tween(200), label = "strobeBarColor"
+    )
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(CardSurface)
+            .padding(12.dp)
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+
+            val numBands = 14
+            val bandWidth = w / numBands
+            val currentPhase = if (isActive) phase else 0f
+            val numTracks = 3
+            val trackH = (h - (numTracks + 1) * 8.dp.toPx()) / numTracks
+
+            for (t in 0 until numTracks) {
+                val trackY = 8.dp.toPx() + t * (trackH + 8.dp.toPx())
+                val mult = 1 shl t
+                val trackPhase = (currentPhase * mult) % 1f
+                val shift = trackPhase * bandWidth
+
+                for (i in -2..numBands + 2) {
+                    val x = i * bandWidth - shift
+                    if ((i + t) % 2 == 0) {
+                        drawRoundRect(
+                            color = if (isInTune) NeonGreen else barColor.copy(alpha = if (t == 1) 0.9f else 0.5f),
+                            topLeft = Offset(x, trackY),
+                            size = Size(bandWidth * 0.7f, trackH),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx())
+                        )
+                    }
+                }
+            }
+
+            // Center target reference line
+            val cx = w / 2f
+            drawLine(
+                color = if (isInTune) NeonGreen else OrangeVibrant,
+                start = Offset(cx, 0f),
+                end = Offset(cx, h),
+                strokeWidth = 3.dp.toPx()
+            )
+        }
+    }
+}
+
 // ─── Tuning Status Label ──────────────────────────────────────────────────────
 
 @Composable
@@ -809,8 +1350,14 @@ private fun TETModeChip(
 private fun GuitarPanel(
     state: TunerUiState,
     onTuningPickerOpen: () -> Unit,
+    onCapoPickerOpen: () -> Unit,
+    onPlayTone: () -> Unit,
     onStringLock: (Int) -> Unit
 ) {
+    val effectiveTuning = if (state.capoFret > 0)
+        state.selectedTuning.withCapo(state.capoFret, state.a4Hz)
+    else state.selectedTuning
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -819,24 +1366,24 @@ private fun GuitarPanel(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Tuning selector header
+        // Tuning selector & Capo / Tone header
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = Strings.selectTuning(state.language),
-                color = TextSecondary,
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Box(
+            // Instrument name + Tuning selector
+            Column(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
-                    .background(OrangeVibrant.copy(alpha = 0.15f))
                     .clickable { onTuningPickerOpen() }
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .padding(4.dp)
             ) {
+                Text(
+                    text = Strings.instrumentName(state.language, state.selectedInstrument),
+                    color = TextMuted,
+                    style = MaterialTheme.typography.labelSmall
+                )
                 Text(
                     text = state.selectedTuning.name,
                     color = OrangeVibrant,
@@ -844,14 +1391,56 @@ private fun GuitarPanel(
                     fontWeight = FontWeight.Bold
                 )
             }
+
+            // Capo button & Reference Tone button
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // Capo button
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (state.capoFret > 0) OrangeVibrant.copy(alpha = 0.25f) else SurfaceVariant)
+                        .clickable { onCapoPickerOpen() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (state.capoFret > 0) "${Strings.capo(state.language)}: +${state.capoFret}" else Strings.capo(state.language),
+                        color = if (state.capoFret > 0) OrangeBright else TextSecondary,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Reference tone for current string
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (state.isReferenceTonePlaying) OrangeVibrant else SurfaceVariant)
+                        .clickable { onPlayTone() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (state.isReferenceTonePlaying) "■ Tone" else "▶ Tone",
+                        color = if (state.isReferenceTonePlaying) OledBlack else TextSecondary,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
         }
 
-        // Auto label
+        // Auto / Locked label
         if (state.lockedStringIndex == -1) {
             Text(
                 text = "● ${Strings.autoDetect(state.language)}",
                 color = OrangeBright,
                 style = MaterialTheme.typography.labelMedium
+            )
+        } else {
+            Text(
+                text = "🔒 ${Strings.lockedLabel(state.language)}: ${effectiveTuning.strings.getOrNull(state.lockedStringIndex)?.let { "${it.noteName}${it.octave}" } ?: ""}",
+                color = OrangeVibrant,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold
             )
         }
 
@@ -860,7 +1449,7 @@ private fun GuitarPanel(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            state.selectedTuning.strings.forEachIndexed { index, guitarString ->
+            effectiveTuning.strings.forEachIndexed { index, guitarString ->
                 val isLocked = state.lockedStringIndex == index
                 val isActive = state.pitchResult.lockedStringIndex == index || state.lockedStringIndex == index
                 val deviation = state.stringCentsDeviations.getOrNull(index)
@@ -881,7 +1470,7 @@ private fun GuitarPanel(
                         .clickable { onStringLock(index) }
                         .padding(4.dp)
                 ) {
-                    // String number circle
+                    // String circle
                     Box(
                         modifier = Modifier
                             .size(44.dp)
@@ -1034,6 +1623,29 @@ private fun SettingsSheet(
             modifier = Modifier.padding(top = 8.dp)
         )
 
+        // ── Display Mode ────────────────────────────────────────────────────
+        Column {
+            Text(Strings.displayMode(state.language), color = TextSecondary, style = MaterialTheme.typography.bodyLarge)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DisplayMode.values().forEach { mode ->
+                    val selected = state.displayMode == mode
+                    val label = if (mode == DisplayMode.NEEDLE) Strings.modeNeedle(state.language) else Strings.modeStrobe(state.language)
+                    FilterChip(
+                        selected = selected,
+                        onClick = { viewModel.setDisplayMode(mode) },
+                        label = { Text(label, style = MaterialTheme.typography.labelLarge) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = OrangeVibrant,
+                            selectedLabelColor = OledBlack,
+                            containerColor = SurfaceVariant,
+                            labelColor = TextSecondary
+                        )
+                    )
+                }
+            }
+        }
+
         // ── A4 Reference ────────────────────────────────────────────────────
         Column {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
@@ -1063,6 +1675,76 @@ private fun SettingsSheet(
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
                 Text("415 Hz", color = TextMuted, style = MaterialTheme.typography.labelSmall)
                 Text("466 Hz", color = TextMuted, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+
+        // ── In-Tune Chime ───────────────────────────────────────────────────
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(Strings.inTuneChime(state.language), color = TextPrimary, style = MaterialTheme.typography.bodyLarge)
+            Switch(
+                checked = state.inTuneChimeEnabled,
+                onCheckedChange = { viewModel.setInTuneChime(it) },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = OledBlack,
+                    checkedTrackColor = OrangeVibrant,
+                    uncheckedThumbColor = TextMuted,
+                    uncheckedTrackColor = SurfaceVariant
+                )
+            )
+        }
+
+        // ── Harmonic Low-Pass Filter ─────────────────────────────────────────
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(Strings.harmonicFilter(state.language), color = TextPrimary, style = MaterialTheme.typography.bodyLarge)
+            Switch(
+                checked = state.lowPassFilterEnabled,
+                onCheckedChange = { viewModel.setLowPassFilter(it) },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = OledBlack,
+                    checkedTrackColor = OrangeVibrant,
+                    uncheckedThumbColor = TextMuted,
+                    uncheckedTrackColor = SurfaceVariant
+                )
+            )
+        }
+
+        // ── Noise Gate ──────────────────────────────────────────────────────
+        Column {
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                Text(
+                    Strings.noiseGate(state.language),
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    "${state.noiseGateDbfs.toInt()} dB",
+                    color = OrangeBright,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Slider(
+                value = state.noiseGateDbfs,
+                onValueChange = { viewModel.setNoiseGate(it) },
+                valueRange = -80f..-20f,
+                steps = 60,
+                colors = SliderDefaults.colors(
+                    thumbColor = OrangeVibrant,
+                    activeTrackColor = OrangeVibrant,
+                    inactiveTrackColor = SurfaceVariant
+                )
+            )
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                Text("-80 dB", color = TextMuted, style = MaterialTheme.typography.labelSmall)
+                Text("-20 dB", color = TextMuted, style = MaterialTheme.typography.labelSmall)
             }
         }
 
@@ -1120,7 +1802,10 @@ private fun SettingsSheet(
 @Composable
 private fun TuningPickerSheet(
     state: TunerUiState,
-    onSelect: (com.truetuna.tuner.model.GuitarTuning) -> Unit,
+    onSelectInstrument: (Instrument) -> Unit,
+    onSelect: (GuitarTuning) -> Unit,
+    onDeleteCustom: (GuitarTuning) -> Unit,
+    onCreateCustomClick: () -> Unit,
     onDismiss: () -> Unit
 ) {
     Column(
@@ -1128,54 +1813,330 @@ private fun TuningPickerSheet(
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
             .padding(start = 20.dp, end = 20.dp, bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(
             Strings.selectTuning(state.language),
             style = MaterialTheme.typography.headlineMedium,
             color = TextPrimary,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 8.dp, bottom = 8.dp)
+            modifier = Modifier.padding(top = 8.dp)
         )
 
-        TuningRepository.categories.forEach { catKey ->
-            val tunings = TuningRepository.getByCategory(catKey)
-            if (tunings.isEmpty()) return@forEach
+        // Instrument Tabs / Scrollable Row
+        Text(
+            text = Strings.instrumentLabel(state.language),
+            color = TextMuted,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(top = 4.dp)
+        )
 
-            Text(
-                text = Strings.categoryLabel(state.language, catKey),
-                color = OrangeVibrant,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
-            )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Instrument.values().forEach { inst ->
+                val isSelected = state.selectedInstrument == inst
+                FilterChip(
+                    selected = isSelected,
+                    onClick = { onSelectInstrument(inst) },
+                    label = {
+                        Text(
+                            text = Strings.instrumentName(state.language, inst),
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = OrangeVibrant,
+                        selectedLabelColor = OledBlack,
+                        containerColor = SurfaceVariant,
+                        labelColor = TextSecondary
+                    )
+                )
+            }
+        }
 
-            tunings.forEach { tuning ->
-                val isSelected = state.selectedTuning.name == tuning.name
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (isSelected) OrangeVibrant.copy(alpha = 0.12f) else Color.Transparent)
-                        .clickable { onSelect(tuning) }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = tuning.name,
-                        color = if (isSelected) OrangeVibrant else TextPrimary,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                    )
-                    // String notes
-                    Text(
-                        text = tuning.strings.joinToString(" ") { "${it.noteName}${it.octave}" },
-                        color = TextMuted,
-                        style = MaterialTheme.typography.labelMedium
-                    )
+        Spacer(Modifier.height(4.dp))
+
+        // Categories for current instrument
+        val categories = TuningRepository.categoriesForInstrument(state.selectedInstrument)
+        categories.forEach { catKey ->
+            val tunings = TuningRepository.getByCategory(catKey, state.selectedInstrument)
+            if (tunings.isNotEmpty()) {
+                Text(
+                    text = Strings.categoryLabel(state.language, catKey),
+                    color = OrangeVibrant,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
+                )
+
+                tunings.forEach { tuning ->
+                    val isSelected = state.selectedTuning.name == tuning.name && state.selectedTuning.instrument == tuning.instrument
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (isSelected) OrangeVibrant.copy(alpha = 0.12f) else Color.Transparent)
+                            .clickable { onSelect(tuning) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = tuning.name,
+                            color = if (isSelected) OrangeVibrant else TextPrimary,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                        Text(
+                            text = tuning.strings.joinToString(" ") { "${it.noteName}${it.octave}" },
+                            color = TextMuted,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
                 }
             }
         }
+
+        // Custom Tunings Section
+        val customs = TuningRepository.customTunings.filter { it.instrument == state.selectedInstrument }
+        Text(
+            text = Strings.categoryLabel(state.language, "custom"),
+            color = OrangeVibrant,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = 14.dp, bottom = 2.dp)
+        )
+
+        customs.forEach { tuning ->
+            val isSelected = state.selectedTuning.name == tuning.name
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (isSelected) OrangeVibrant.copy(alpha = 0.12f) else Color.Transparent)
+                    .clickable { onSelect(tuning) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = tuning.name,
+                        color = if (isSelected) OrangeVibrant else TextPrimary,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = tuning.strings.joinToString(" ") { "${it.noteName}${it.octave}" },
+                        color = TextMuted,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .clickable { onDeleteCustom(tuning) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("🗑", fontSize = 14.sp)
+                }
+            }
+        }
+
+        // Button to create custom tuning
+        Button(
+            onClick = onCreateCustomClick,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant)
+        ) {
+            Text("+ ${Strings.categoryLabel(state.language, "custom")}", color = OrangeBright, fontWeight = FontWeight.Bold)
+        }
     }
+}
+
+// ─── Capo Picker Sheet ─────────────────────────────────────────────────────────
+
+@Composable
+private fun CapoPickerSheet(
+    currentFret: Int,
+    lang: Language,
+    onSelectFret: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 20.dp, end = 20.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = Strings.capo(lang),
+            style = MaterialTheme.typography.headlineMedium,
+            color = TextPrimary,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            (0..9).forEach { fret ->
+                val isSelected = currentFret == fret
+                FilterChip(
+                    selected = isSelected,
+                    onClick = { onSelectFret(fret) },
+                    label = {
+                        Text(
+                            text = if (fret == 0) Strings.noCapo(lang) else Strings.capoFret(lang, fret),
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = OrangeVibrant,
+                        selectedLabelColor = OledBlack,
+                        containerColor = SurfaceVariant,
+                        labelColor = TextSecondary
+                    )
+                )
+            }
+        }
+    }
+}
+
+// ─── Custom Tuning Dialog ─────────────────────────────────────────────────────
+
+@Composable
+private fun CustomTuningDialog(
+    instrument: Instrument,
+    lang: Language,
+    onDismiss: () -> Unit,
+    onSave: (GuitarTuning) -> Unit
+) {
+    var tuningName by remember { mutableStateOf("") }
+    val stringCount = instrument.stringCount
+
+    val notes = remember {
+        mutableStateOf(
+            List(stringCount) { i ->
+                when (instrument) {
+                    Instrument.GUITAR_6 -> listOf("E" to 2, "A" to 2, "D" to 3, "G" to 3, "B" to 3, "E" to 4)[i]
+                    Instrument.BASS_4 -> listOf("E" to 1, "A" to 1, "D" to 2, "G" to 2)[i]
+                    Instrument.BASS_5 -> listOf("B" to 0, "E" to 1, "A" to 1, "D" to 2, "G" to 2)[i]
+                    Instrument.VIOLIN -> listOf("G" to 3, "D" to 4, "A" to 4, "E" to 5)[i]
+                    Instrument.CELLO -> listOf("C" to 2, "G" to 2, "D" to 3, "A" to 3)[i]
+                    else -> listOf("G" to 4, "C" to 4, "E" to 4, "A" to 4)[i]
+                }
+            }.toMutableList()
+        )
+    }
+
+    val noteOptions = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+        title = {
+            Text("Create Custom Tuning", color = TextPrimary, fontWeight = FontWeight.Bold)
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = tuningName,
+                    onValueChange = { tuningName = it },
+                    label = { Text("Tuning Name (e.g. Open D)", color = TextMuted) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        focusedBorderColor = OrangeVibrant,
+                        unfocusedBorderColor = SurfaceVariant
+                    )
+                )
+
+                Text("Strings (Low to High):", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+
+                for (idx in 0 until stringCount) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Str ${idx + 1}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                        // Note cycler
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(SurfaceVariant)
+                                .clickable {
+                                    val current = notes.value[idx].first
+                                    val nextIdx = (noteOptions.indexOf(current) + 1) % noteOptions.size
+                                    val updated = notes.value.toMutableList()
+                                    updated[idx] = noteOptions[nextIdx] to updated[idx].second
+                                    notes.value = updated
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(notes.value[idx].first, color = OrangeBright, fontWeight = FontWeight.Bold)
+                        }
+                        // Octave cycler
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(SurfaceVariant)
+                                .clickable {
+                                    val currentOct = notes.value[idx].second
+                                    val nextOct = if (currentOct >= 6) 1 else currentOct + 1
+                                    val updated = notes.value.toMutableList()
+                                    updated[idx] = updated[idx].first to nextOct
+                                    notes.value = updated
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text("Oct ${notes.value[idx].second}", color = TextSecondary)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val finalName = if (tuningName.isBlank()) "Custom Tuning" else tuningName.trim()
+                    val noteIndex = mapOf(
+                        "C" to 0, "C#" to 1, "D" to 2, "D#" to 3, "E" to 4, "F" to 5,
+                        "F#" to 6, "G" to 7, "G#" to 8, "A" to 9, "A#" to 10, "B" to 11
+                    )
+                    val gStrings = notes.value.mapIndexed { i, pair ->
+                        val semi = (noteIndex[pair.first] ?: 0) + pair.second * 12
+                        GuitarString(i + 1, pair.first, pair.second, semi, com.truetuna.tuner.model.semitoneToFrequency(semi, 440f))
+                    }
+                    onSave(GuitarTuning(finalName, "custom", gStrings, instrument, isCustom = true))
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = OrangeVibrant)
+            ) {
+                Text("Save", color = OledBlack, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant)
+            ) {
+                Text("Cancel", color = TextSecondary)
+            }
+        }
+    )
 }

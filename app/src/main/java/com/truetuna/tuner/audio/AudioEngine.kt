@@ -17,8 +17,15 @@ import kotlinx.coroutines.launch
  * AudioRecord after start(), so it is also the one that stops and releases it.
  */
 class AudioEngine(
+    noiseGateDbfs: Double = PitchDetector.DEFAULT_NOISE_GATE_DBFS,
+    lowPassEnabled: Boolean = true,
     private val onPitchDetected: (Float) -> Unit
 ) {
+    constructor(onPitchDetected: (Float) -> Unit) : this(
+        noiseGateDbfs = PitchDetector.DEFAULT_NOISE_GATE_DBFS,
+        lowPassEnabled = true,
+        onPitchDetected = onPitchDetected
+    )
     companion object {
         private val SAMPLE_RATES = intArrayOf(44100, 48000)
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
@@ -32,6 +39,19 @@ class AudioEngine(
     private var captureJob: Job? = null
     private var scope: CoroutineScope? = null
     @Volatile private var isRunning = false
+    @Volatile private var initialNoiseGate: Double = noiseGateDbfs
+    @Volatile private var initialLowPass: Boolean = lowPassEnabled
+    @Volatile private var detector: PitchDetector? = null
+
+    fun setNoiseGate(dbfs: Double) {
+        initialNoiseGate = dbfs
+        detector?.setNoiseGate(dbfs)
+    }
+
+    fun setLowPassFilter(enabled: Boolean) {
+        initialLowPass = enabled
+        detector?.setLowPassFilter(enabled)
+    }
 
     /**
      * Start audio capture. Must only be called when RECORD_AUDIO permission is granted.
@@ -55,8 +75,12 @@ class AudioEngine(
         }
         val rec: AudioRecord = record ?: return false
 
-        val detector = PitchDetector(usedRate)
-        val windowSize = maxOf(WINDOW_SAMPLES, detector.minWindowSize)
+        val det = PitchDetector(usedRate).apply {
+            setNoiseGate(initialNoiseGate)
+            setLowPassFilter(initialLowPass)
+        }
+        detector = det
+        val windowSize = maxOf(WINDOW_SAMPLES, det.minWindowSize)
 
         try {
             rec.startRecording()
@@ -88,7 +112,7 @@ class AudioEngine(
                     filled = minOf(filled + read, windowSize)
                     if (filled < windowSize) continue // wait until the window is full
 
-                    onPitchDetected(detector.detect(window))
+                    onPitchDetected(det.detect(window))
                 }
             } finally {
                 try {
@@ -96,7 +120,8 @@ class AudioEngine(
                 } catch (_: Exception) {
                 }
                 rec.release()
-                detector.reset()
+                det.reset()
+                detector = null
             }
         }
         return true

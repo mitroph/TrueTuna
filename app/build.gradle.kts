@@ -23,7 +23,8 @@ android {
             // Signed with the debug key so `assembleRelease` also yields an installable APK.
             // Replace with your own signingConfig for Play Store distribution.
             signingConfig = signingConfigs.getByName("debug")
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

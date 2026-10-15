@@ -34,6 +34,13 @@ class PitchDetector(private val sampleRate: Int) {
         private const val MAX_MISSES = 4
 
         const val DEFAULT_NOISE_GATE_DBFS = -55.0
+
+        /**
+         * One-pole IIR low-pass coefficient tuned to roughly 350 Hz at 44100 Hz sample rate.
+         * alpha = 1 - e^(-2π·fc/fs)
+         * fc=350, fs=44100 → alpha ≈ 0.0498
+         */
+        private const val LP_ALPHA = 0.05f
     }
 
     val minPeriod: Int = (sampleRate / MAX_FREQUENCY).toInt().coerceAtLeast(2)
@@ -57,6 +64,14 @@ class PitchDetector(private val sampleRate: Int) {
         noiseGateDbfs = dbfs
     }
 
+    @Volatile
+    private var lowPassEnabled = false
+
+    /** Enable/disable the harmonic low-pass pre-filter (helpful for bass strings, E1/B0). */
+    fun setLowPassFilter(enabled: Boolean) {
+        lowPassEnabled = enabled
+    }
+
     /**
      * Detect pitch from the most recent [buffer] of float PCM samples (range -1..1).
      * Returns the smoothed frequency in Hz, or 0f if the signal is too quiet / no pitch found.
@@ -71,7 +86,11 @@ class PitchDetector(private val sampleRate: Int) {
             return 0f
         }
 
-        val raw = yinDetect(buffer)
+        // Apply harmonic low-pass pre-filter on a copy to avoid in-place mutation of the
+        // caller's buffer. Only engage when low-pass is enabled; this reduces octave jumps
+        // on thicker strings (E1, B0) where 2nd/3rd harmonics can confuse YIN.
+        val analysisBuffer = if (lowPassEnabled) applyLowPass(buffer) else buffer
+        val raw = yinDetect(analysisBuffer)
         if (raw == null) {
             // Short dropouts: hold the last value for a few frames to keep the UI steady.
             misses++
@@ -188,7 +207,23 @@ class PitchDetector(private val sampleRate: Int) {
     private fun centsBetween(a: Float, b: Float): Double =
         abs(1200.0 * ln(a.toDouble() / b.toDouble()) / ln(2.0))
 
+    /**
+     * One-pole IIR low-pass filter — returns a filtered copy of [input].
+     * Attenuates content above ~350 Hz (LP_ALPHA ≈ 0.05) to suppress 2nd/3rd harmonics
+     * that can cause octave doubling on low strings.
+     */
+    private fun applyLowPass(input: FloatArray): FloatArray {
+        val out = FloatArray(input.size)
+        var y = input[0]
+        for (i in input.indices) {
+            y += LP_ALPHA * (input[i] - y)
+            out[i] = y
+        }
+        return out
+    }
+
     fun reset() {
+
         smoothedFrequency = 0f
         misses = 0
         medianBuffer.clear()

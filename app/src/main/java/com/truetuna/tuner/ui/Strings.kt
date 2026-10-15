@@ -110,6 +110,26 @@ object Strings {
         "standard_drop" -> categoryStandardDrop(lang)
         "open" -> categoryOpen(lang)
         "alternative" -> categoryAlternative(lang)
+        "bass" -> when (lang) {
+            Language.RU -> "Бас-гитара"
+            Language.UA -> "Бас-гітара"
+            Language.EN -> "Bass"
+        }
+        "ukulele" -> when (lang) {
+            Language.RU -> "Укулеле"
+            Language.UA -> "Укулеле"
+            Language.EN -> "Ukulele"
+        }
+        "orchestral" -> when (lang) {
+            Language.RU -> "Смычковые"
+            Language.UA -> "Смичкові"
+            Language.EN -> "Orchestral"
+        }
+        "custom" -> when (lang) {
+            Language.RU -> "Мои строи"
+            Language.UA -> "Мої строї"
+            Language.EN -> "Custom Tunings"
+        }
         else -> key
     }
 
@@ -195,5 +215,152 @@ object Strings {
         Language.RU -> "Зафиксировано"
         Language.UA -> "Зафіксовано"
         Language.EN -> "Locked"
+    }
+
+    // ── Instruments ──────────────────────────────────────────────────────────
+
+    fun instrumentLabel(lang: Language) = when (lang) {
+        Language.RU -> "Инструмент"
+        Language.UA -> "Інструмент"
+        Language.EN -> "Instrument"
+    }
+
+    fun instrumentName(lang: Language, instrument: com.truetuna.tuner.model.Instrument) = when (instrument) {
+        com.truetuna.tuner.model.Instrument.GUITAR_6 -> when (lang) {
+            Language.RU -> "Гитара 6-струн"
+            Language.UA -> "Гітара 6-струн"
+            Language.EN -> "6-String Guitar"
+        }
+        com.truetuna.tuner.model.Instrument.BASS_4 -> when (lang) {
+            Language.RU -> "Бас 4-струн"
+            Language.UA -> "Бас 4-струн"
+            Language.EN -> "4-String Bass"
+        }
+        com.truetuna.tuner.model.Instrument.BASS_5 -> when (lang) {
+            Language.RU -> "Бас 5-струн"
+            Language.UA -> "Бас 5-струн"
+            Language.EN -> "5-String Bass"
+        }
+        com.truetuna.tuner.model.Instrument.UKULELE -> when (lang) {
+            Language.RU -> "Укулеле (Сопрано)"
+            Language.UA -> "Укулеле (Сопрано)"
+            Language.EN -> "Ukulele (Soprano)"
+        }
+        com.truetuna.tuner.model.Instrument.UKULELE_TENOR -> when (lang) {
+            Language.RU -> "Укулеле (Тенор)"
+            Language.UA -> "Укулеле (Тенор)"
+            Language.EN -> "Ukulele (Tenor)"
+        }
+        com.truetuna.tuner.model.Instrument.UKULELE_BARITONE -> when (lang) {
+            Language.RU -> "Укулеле (Баритон)"
+            Language.UA -> "Укулеле (Баритон)"
+            Language.EN -> "Ukulele (Baritone)"
+        }
+        com.truetuna.tuner.model.Instrument.VIOLIN -> when (lang) {
+            Language.RU -> "Скрипка"
+            Language.UA -> "Скрипка"
+            Language.EN -> "Violin"
+        }
+        com.truetuna.tuner.model.Instrument.CELLO -> when (lang) {
+            Language.RU -> "Виолончель"
+            Language.UA -> "Віолончель"
+            Language.EN -> "Cello"
+        }
+    }
+
+    // ── Capo ─────────────────────────────────────────────────────────────────
+
+    fun capo(lang: Language) = when (lang) {
+        Language.RU -> "Каподастр"
+        Language.UA -> "Каподастр"
+        Language.EN -> "Capo"
+    }
+
+    fun noCapo(lang: Language) = when (lang) {
+        Language.RU -> "Без капо"
+        Language.UA -> "Без капо"
+        Language.EN -> "No Capo"
+    }
+
+    fun capoFret(lang: Language, fret: Int) = when (lang) {
+        Language.RU -> "Капо $fret лад"
+        Language.UA -> "Капо $fret лад"
+        Language.EN -> "Capo $fret"
+    }
+
+    // ── Reference Tone ───────────────────────────────────────────────────────
+
+    fun toneGenerator(lang: Language) = when (lang) {
+        Language.RU -> "Эталонный тон"
+        Language.UA -> "Еталонний тон"
+        Language.EN -> "Tone Generator"
+    }
+
+    fun playTone(lang: Language) = when (lang) {
+        Language.RU -> "Звук"
+        Language.UA -> "Звук"
+        Language.EN -> "Tone"
+    }
+
+    // ── Metronome ─────────────────────────────────────────────────────────────
+
+    fun metronome(lang: Language) = when (lang) {
+        Language.RU -> "Метроном"
+        Language.UA -> "Метроном"
+        Language.EN -> "Metronome"
+    }
+
+    fun bpm(lang: Language) = "BPM"
+
+    fun beats(lang: Language) = when (lang) {
+        Language.RU -> "Размер"
+        Language.UA -> "Розмір"
+        Language.EN -> "Beats"
+    }
+
+    fun sound(lang: Language) = when (lang) {
+        Language.RU -> "Звук клика"
+        Language.UA -> "Звук кліка"
+        Language.EN -> "Click Sound"
+    }
+
+    // ── Display Mode ──────────────────────────────────────────────────────────
+
+    fun displayMode(lang: Language) = when (lang) {
+        Language.RU -> "Режим шкалы"
+        Language.UA -> "Режим шкали"
+        Language.EN -> "Display Style"
+    }
+
+    fun modeNeedle(lang: Language) = when (lang) {
+        Language.RU -> "Стрелочный"
+        Language.UA -> "Стрілочний"
+        Language.EN -> "Needle"
+    }
+
+    fun modeStrobe(lang: Language) = when (lang) {
+        Language.RU -> "Стробоскоп"
+        Language.UA -> "Стробоскоп"
+        Language.EN -> "Strobe"
+    }
+
+    // ── DSP Settings ──────────────────────────────────────────────────────────
+
+    fun noiseGate(lang: Language) = when (lang) {
+        Language.RU -> "Шумоподавление"
+        Language.UA -> "Шумозаглушення"
+        Language.EN -> "Noise Gate"
+    }
+
+    fun harmonicFilter(lang: Language) = when (lang) {
+        Language.RU -> "Фильтр обертонов (бас)"
+        Language.UA -> "Фільтр обертонів (бас)"
+        Language.EN -> "Harmonic Low-Pass"
+    }
+
+    fun inTuneChime(lang: Language) = when (lang) {
+        Language.RU -> "Звук при точной настройке"
+        Language.UA -> "Звук при точному налаштуванні"
+        Language.EN -> "In-Tune Chime"
     }
 }

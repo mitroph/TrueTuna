@@ -4,6 +4,7 @@ import com.truetuna.tuner.audio.PitchDetector
 import com.truetuna.tuner.data.TuningRepository
 import com.truetuna.tuner.model.TETMode
 import com.truetuna.tuner.model.computePitchResult
+import com.truetuna.tuner.model.withCapo
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.log2
@@ -76,13 +77,32 @@ class TunerLogicTest {
 
     @Test
     fun repositoryHasAllTunings() {
-        assertEquals(15, TuningRepository.allTunings.size)
-        TuningRepository.allTunings.forEach { assertEquals(6, it.strings.size) }
-        val std = TuningRepository.allTunings.first { it.name == "Standard" }
+        assertEquals(15, TuningRepository.guitarPresets.size)
+        TuningRepository.guitarPresets.forEach { assertEquals(6, it.strings.size) }
+        assertTrue(TuningRepository.allTunings.size >= 15)
+        val std = TuningRepository.guitarPresets.first { it.name == "Standard" }
         assertEquals(82.41f, std.strings[0].frequencyHz, 0.01f)
         assertEquals(329.63f, std.strings[5].frequencyHz, 0.01f)
         assertEquals(82.41f, std.strings[0].frequencyFor(440f), 0.01f)
         // A4 = 415 lowers every target by the same ratio
         assertEquals(82.41f * 415f / 440f, std.strings[0].frequencyFor(415f), 0.05f)
+    }
+
+    @Test
+    fun multiInstrumentAndCapoLogic() {
+        val bass = TuningRepository.forInstrument(com.truetuna.tuner.model.Instrument.BASS_4)
+        assertTrue(bass.isNotEmpty())
+        assertEquals(4, bass.first().strings.size)
+
+        val uke = TuningRepository.forInstrument(com.truetuna.tuner.model.Instrument.UKULELE)
+        assertTrue(uke.isNotEmpty())
+        assertEquals(4, uke.first().strings.size)
+
+        val std = TuningRepository.guitarPresets.first { it.name == "Standard" }
+        val capo2 = std.withCapo(2)
+        assertEquals(std.strings.size, capo2.strings.size)
+        // Standard string 0 is E2 (semitone 28). Capo 2 -> F#2 (semitone 30)
+        assertEquals("F#", capo2.strings[0].noteName)
+        assertEquals(2, capo2.strings[0].octave)
     }
 }

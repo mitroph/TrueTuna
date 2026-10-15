@@ -8,5 +8,6 @@
 # Uncomment this to preserve the line number information for debugging stack traces.
 -keepattributes SourceFile,LineNumberTable
 
-# If you keep the line number information, uncomment this to hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Preserve model data classes and enums used across UI state and serialization
+-keep class com.truetuna.tuner.model.** { *; }
+-keepclassmembers enum * { *; }
