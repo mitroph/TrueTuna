@@ -1,6 +1,8 @@
 package com.truetuna.tuner.audio
 
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.log10
 import kotlin.math.ln
 import kotlin.math.sqrt
@@ -35,13 +37,12 @@ class PitchDetector(private val sampleRate: Int) {
 
         const val DEFAULT_NOISE_GATE_DBFS = -55.0
 
-        /**
-         * One-pole IIR low-pass coefficient tuned to roughly 350 Hz at 44100 Hz sample rate.
-         * alpha = 1 - e^(-2π·fc/fs)
-         * fc=350, fs=44100 → alpha ≈ 0.0498
-         */
-        private const val LP_ALPHA = 0.05f
+        /** Cut-off of the optional harmonic low-pass pre-filter. */
+        private const val LP_CUTOFF_HZ = 350.0
     }
+
+    /** One-pole IIR coefficient for [LP_CUTOFF_HZ] at this sample rate: 1 - e^(-2π·fc/fs). */
+    private val lpAlpha = (1.0 - exp(-2.0 * PI * LP_CUTOFF_HZ / sampleRate)).toFloat()
 
     val minPeriod: Int = (sampleRate / MAX_FREQUENCY).toInt().coerceAtLeast(2)
     val maxPeriod: Int = (sampleRate / MIN_FREQUENCY).toInt()
@@ -209,14 +210,14 @@ class PitchDetector(private val sampleRate: Int) {
 
     /**
      * One-pole IIR low-pass filter — returns a filtered copy of [input].
-     * Attenuates content above ~350 Hz (LP_ALPHA ≈ 0.05) to suppress 2nd/3rd harmonics
+     * Attenuates content above ~350 Hz to suppress 2nd/3rd harmonics
      * that can cause octave doubling on low strings.
      */
     private fun applyLowPass(input: FloatArray): FloatArray {
         val out = FloatArray(input.size)
         var y = input[0]
         for (i in input.indices) {
-            y += LP_ALPHA * (input[i] - y)
+            y += lpAlpha * (input[i] - y)
             out[i] = y
         }
         return out

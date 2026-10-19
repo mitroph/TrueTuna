@@ -2,54 +2,70 @@ package com.truetuna.tuner.audio
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlin.math.PI
-import kotlin.math.sin
+import android.os.Process
+import kotlin.concurrent.thread
 
 /**
- * Plays a reference tone (pure sine or Karplus-Strong plucked string) at a given frequency.
+ * Plays one reference note in the timbre of the instrument being tuned (see [InstrumentVoice]).
  *
  * Usage:
- *   tonePlayer.play(frequency = 82.41f)   // E2 — sine wave
- *   tonePlayer.play(frequency = 82.41f, mode = ToneMode.PLUCK)  // plucked
+ *   tonePlayer.play(frequency = 82.41f, timbre = Timbre.ACOUSTIC_GUITAR) { /* note ended */ }
  *   tonePlayer.stop()
  *
- * Thread-safe: play/stop can be called from any thread.
+ * Each note runs on its own audio thread. [stop] (or a new [play]) fades the current note out
+ * instead of cutting it, which would click. Thread-safe: play/stop can be called from any thread.
  */
 class TonePlayer {
 
-    companion object {
-        private const val SAMPLE_RATE = 44100
-        private const val CHUNK = 1024      // samples per write burst
-        private const val FADE_SAMPLES = 512 // fade-in length in samples
+    private class Session {
+        @Volatile var stopRequested = false
     }
 
-    private var playJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
-    @Volatile private var currentFrequency = 0f
+    @Volatile private var session: Session? = null
 
     /**
-     * Start (or retarget) the reference tone at [frequency] Hz.
-     * Calling [play] while a tone is already running will smoothly cross-fade.
+     * Start a note at [frequency] Hz. [onFinished] is invoked on the audio thread once the note
+     * has finished playing or was stopped.
      */
-    fun play(frequency: Float, mode: ToneMode = ToneMode.SINE) {
-        if (frequency <= 0f) { stop(); return }
-        if (currentFrequency == frequency && playJob?.isActive == true) return
-        currentFrequency = frequency
-        playJob?.cancel()
-        playJob = scope.launch {
-            val bufBytes = AudioTrack.getMinBufferSize(
-                SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT
-            ).coerceAtLeast(CHUNK * 4)
+    fun play(frequency: Float, timbre: Timbre, onFinished: () -> Unit = {}) {
+        stop()
+        if (frequency <= 0f) {
+            onFinished()
+            return
+        }
+        val s = Session()
+        session = s
+        thread(name = "TonePlayer", isDaemon = true) {
+            try {
+                run(s, frequency, timbre)
+            } finally {
+                onFinished()
+            }
+        }
+    }
 
-            val track = AudioTrack.Builder()
+    /** Fade out and stop the current note, if any. */
+    fun stop() {
+        session?.stopRequested = true
+        session = null
+    }
+
+    fun release() = stop()
+
+    private fun run(s: Session, frequency: Float, timbre: Timbre) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+        val sampleRate = AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC)
+            .takeIf { it > 0 } ?: 48000
+        val note = InstrumentVoice.render(timbre, frequency, sampleRate)
+        if (s.stopRequested) return
+
+        val minBuf = AudioTrack.getMinBufferSize(
+            sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT
+        )
+        val track = try {
+            AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -59,87 +75,64 @@ class TonePlayer {
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                        .setSampleRate(SAMPLE_RATE)
+                        .setSampleRate(sampleRate)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build()
                 )
-                .setBufferSizeInBytes(bufBytes)
+                .setBufferSizeInBytes(maxOf(minBuf, CHUNK * 4 * 2))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
+        } catch (_: Exception) {
+            return
+        }
 
-            try {
-                track.play()
-                val buffer = FloatArray(CHUNK)
-                var phase = 0.0
-                val phaseInc = 2.0 * PI * frequency / SAMPLE_RATE
-
-                // Karplus-Strong plucked string: delay-line initialised with noise
-                val ksBuffer = if (mode == ToneMode.PLUCK) initKarplusStrong(frequency) else null
-                var ksIndex = 0
-                var sampleIndex = 0L
-
-                while (isActive && currentFrequency == frequency) {
-                    if (mode == ToneMode.PLUCK && sampleIndex >= SAMPLE_RATE) {
-                        break
+        try {
+            track.play()
+            val fadeLen = (FADE_SEC * sampleRate).toInt()
+            var pos = 0
+            var fadeStart = -1
+            while (pos < note.size) {
+                if (s.stopRequested && fadeStart < 0) fadeStart = pos
+                val end = minOf(pos + CHUNK, note.size)
+                if (fadeStart >= 0) {
+                    // Apply the fade-out in place and stop once it has reached silence.
+                    for (i in pos until end) {
+                        val g = 1f - (i - fadeStart).toFloat() / fadeLen
+                        note[i] *= g.coerceAtLeast(0f)
                     }
-                    for (i in 0 until CHUNK) {
-                        val raw: Float = when (mode) {
-                            ToneMode.SINE -> sin(phase).toFloat()
-                            ToneMode.PLUCK -> {
-                                val ks = ksBuffer!!
-                                val idx = ksIndex % ks.size
-                                val next = (ksIndex + 1) % ks.size
-                                val v = ks[idx]
-                                // Averaging filter with slight decay for natural decay envelope
-                                ks[idx] = 0.996f * 0.5f * (v + ks[next])
-                                ksIndex++
-                                v
-                            }
-                        }
-                        val amplitude = when {
-                            sampleIndex < FADE_SAMPLES -> 0.5f * sampleIndex.toFloat() / FADE_SAMPLES
-                            else -> 0.5f
-                        }
-                        buffer[i] = raw * amplitude
-                        phase += phaseInc
-                        if (phase > 2.0 * PI) phase -= 2.0 * PI
-                        sampleIndex++
-                    }
-                    track.write(buffer, 0, CHUNK, AudioTrack.WRITE_BLOCKING)
                 }
-
-                if (mode == ToneMode.PLUCK && currentFrequency == frequency) {
-                    currentFrequency = 0f
+                var offset = pos
+                while (offset < end) {
+                    val w = track.write(note, offset, end - offset, AudioTrack.WRITE_BLOCKING)
+                    if (w < 0) return
+                    offset += w
                 }
-
-                // Short fade-out to avoid clicks
-                for (i in 0 until CHUNK) {
-                    buffer[i] = buffer[i] * (1f - i.toFloat() / CHUNK)
-                }
-                track.write(buffer, 0, CHUNK, AudioTrack.WRITE_BLOCKING)
-            } finally {
-                try { track.stop() } catch (_: Exception) {}
-                track.release()
+                pos = end
+                if (fadeStart >= 0 && pos - fadeStart >= fadeLen) break
             }
+            // Let the queued audio drain before releasing the track.
+            val total = pos.toLong()
+            val deadline = System.currentTimeMillis() + 1000
+            while (System.currentTimeMillis() < deadline &&
+                (track.playbackHeadPosition.toLong() and 0xFFFFFFFFL) < total
+            ) {
+                if (s.stopRequested && fadeStart < 0) break
+                Thread.sleep(10)
+            }
+        } catch (_: Exception) {
+            // Audio device lost etc.: just stop.
+        } finally {
+            try {
+                track.pause()
+                track.flush()
+            } catch (_: Exception) {
+            }
+            track.release()
         }
     }
 
-    /** Stop the reference tone immediately. */
-    fun stop() {
-        currentFrequency = 0f
-        playJob?.cancel()
-        playJob = null
+    private companion object {
+        const val CHUNK = 512
+        const val FADE_SEC = 0.04
     }
-
-    fun release() {
-        stop()
-    }
-
-    private fun initKarplusStrong(frequency: Float): FloatArray {
-        val period = (SAMPLE_RATE / frequency).toInt().coerceAtLeast(2)
-        return FloatArray(period) { (Math.random().toFloat() * 2f - 1f) }
-    }
-
-    enum class ToneMode { SINE, PLUCK }
 }
-

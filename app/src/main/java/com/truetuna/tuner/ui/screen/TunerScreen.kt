@@ -1678,25 +1678,6 @@ private fun SettingsSheet(
             }
         }
 
-        // ── In-Tune Chime ───────────────────────────────────────────────────
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(Strings.inTuneChime(state.language), color = TextPrimary, style = MaterialTheme.typography.bodyLarge)
-            Switch(
-                checked = state.inTuneChimeEnabled,
-                onCheckedChange = { viewModel.setInTuneChime(it) },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = OledBlack,
-                    checkedTrackColor = OrangeVibrant,
-                    uncheckedThumbColor = TextMuted,
-                    uncheckedTrackColor = SurfaceVariant
-                )
-            )
-        }
-
         // ── Harmonic Low-Pass Filter ─────────────────────────────────────────
         Row(
             modifier = Modifier.fillMaxWidth(),

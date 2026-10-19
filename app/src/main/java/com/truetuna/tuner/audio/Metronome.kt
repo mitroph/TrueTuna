@@ -2,116 +2,125 @@ package com.truetuna.tuner.audio
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlin.math.PI
-import kotlin.math.exp
-import kotlin.math.sin
+import android.os.Process
+import kotlin.concurrent.thread
 
 /**
- * Coroutine-based metronome with synthesized click.
+ * Metronome driven by the audio clock.
  *
- * - Beat 0 of each bar = accented click (higher frequency + louder).
- * - Non-accent beats = soft click.
- * - [onBeat] is invoked on every beat, passing the 0-based beat index within the bar.
- * - Uses a simple exponentially-decaying sine burst for the click sound (no audio files needed).
+ * A dedicated audio-priority thread streams [MetronomeRenderer] output (clicks *and* the silence
+ * between them) into an AudioTrack with blocking writes, so timing is sample-accurate. The old
+ * implementation slept between beats and dropped isolated clicks into an otherwise starved
+ * stream: the track underran between beats and the moment each click actually started depended
+ * on how the mixer recovered from the underrun, which made slower tempos (longer gaps) erratic.
+ *
+ * [onBeat] is invoked (on the audio thread) when the beat reaches the speaker, i.e. once the
+ * playback head passes it, so the visual pulse matches what is heard.
  */
 class Metronome(private val onBeat: (beatIndex: Int) -> Unit) {
 
-    companion object {
-        private const val SAMPLE_RATE = 44100
-        private const val CLICK_DURATION_SAMPLES = 2048  // ~46 ms click
+    private class Session(
+        @Volatile var bpm: Int,
+        @Volatile var beatsPerBar: Int,
+        @Volatile var soundEnabled: Boolean
+    ) {
+        @Volatile var running = true
     }
 
-    private var job: Job? = null
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    @Volatile private var session: Session? = null
 
     fun start(bpm: Int, beatsPerBar: Int, soundEnabled: Boolean) {
         stop()
-        job = scope.launch {
-            val intervalMs = 60_000L / bpm.coerceIn(20, 300)
-            var beatIndex = 0
+        val s = Session(bpm, beatsPerBar, soundEnabled)
+        session = s
+        thread(name = "Metronome", isDaemon = true) { run(s) }
+    }
 
-            // Pre-render the two click waveforms
-            val accentClick = renderClick(freq = 1200f, amplitude = 0.9f)
-            val normalClick = renderClick(freq = 800f, amplitude = 0.6f)
-
-            val bufBytes = AudioTrack.getMinBufferSize(
-                SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT
-            ).coerceAtLeast(CLICK_DURATION_SAMPLES * 4)
-
-            val track = if (soundEnabled) {
-                AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build()
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build()
-                    )
-                    .setBufferSizeInBytes(bufBytes)
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
-                    .also { it.play() }
-            } else null
-
-            try {
-                var nextBeatTime = System.currentTimeMillis()
-                while (isActive) {
-                    val now = System.currentTimeMillis()
-                    val sleepMs = nextBeatTime - now
-                    if (sleepMs > 0) delay(sleepMs)
-
-                    // Fire callback for UI
-                    val beat = beatIndex
-                    onBeat(beat)
-
-                    // Write click audio
-                    if (track != null) {
-                        val click = if (beat == 0) accentClick else normalClick
-                        track.write(click, 0, click.size, AudioTrack.WRITE_NON_BLOCKING)
-                    }
-
-                    beatIndex = (beatIndex + 1) % beatsPerBar
-                    nextBeatTime += intervalMs
-                }
-            } finally {
-                try { track?.stop() } catch (_: Exception) {}
-                track?.release()
-            }
+    /** Apply new settings to the running metronome without restarting it. */
+    fun update(bpm: Int, beatsPerBar: Int, soundEnabled: Boolean) {
+        session?.let {
+            it.bpm = bpm
+            it.beatsPerBar = beatsPerBar
+            it.soundEnabled = soundEnabled
         }
     }
 
     fun stop() {
-        job?.cancel()
-        job = null
+        session?.running = false
+        session = null
     }
 
     fun release() = stop()
 
-    /**
-     * Render a single click burst: sine wave at [freq] Hz with exponential decay envelope.
-     */
-    private fun renderClick(freq: Float, amplitude: Float): FloatArray {
-        val buf = FloatArray(CLICK_DURATION_SAMPLES)
-        val phaseInc = 2.0 * PI * freq / SAMPLE_RATE
-        val decay = -8.0 / CLICK_DURATION_SAMPLES   // controls click sharpness
-        for (i in buf.indices) {
-            val envelope = amplitude * exp(decay * i).toFloat()
-            buf[i] = (sin(phaseInc * i) * envelope).toFloat()
+    private fun run(s: Session) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        val sampleRate = AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC)
+            .takeIf { it > 0 } ?: 48000
+        val minBuf = AudioTrack.getMinBufferSize(
+            sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT
+        )
+        val track = try {
+            AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(maxOf(minBuf, BLOCK_FRAMES * 4 * 4))
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+        } catch (_: Exception) {
+            return
         }
-        return buf
+
+        val renderer = MetronomeRenderer(sampleRate)
+        val block = FloatArray(BLOCK_FRAMES)
+        // Beats rendered but not yet heard: (absolute frame, beat index).
+        val pending = ArrayDeque<Pair<Long, Int>>()
+        try {
+            track.play()
+            while (s.running) {
+                renderer.render(block, s.bpm, s.beatsPerBar, s.soundEnabled) { frame, beat ->
+                    pending.addLast(frame to beat)
+                }
+                var offset = 0
+                while (offset < block.size && s.running) {
+                    val written = track.write(block, offset, block.size - offset, AudioTrack.WRITE_BLOCKING)
+                    if (written < 0) return
+                    offset += written
+                }
+                // playbackHeadPosition is an unsigned 32-bit frame counter.
+                val played = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+                while (pending.isNotEmpty() && pending.first().first <= played) {
+                    val beat = pending.removeFirst().second
+                    if (s.running) onBeat(beat)
+                }
+            }
+        } catch (_: Exception) {
+            // Audio device lost etc.: just stop.
+        } finally {
+            try {
+                track.pause()
+                track.flush()
+            } catch (_: Exception) {
+            }
+            track.release()
+        }
+    }
+
+    private companion object {
+        /** ~5 ms at 48 kHz: granularity of tempo changes and of beat notifications. */
+        const val BLOCK_FRAMES = 256
     }
 }
