@@ -357,10 +357,4 @@ object Strings {
         Language.UA -> "Фільтр обертонів (бас)"
         Language.EN -> "Harmonic Low-Pass"
     }
-
-    fun inTuneChime(lang: Language) = when (lang) {
-        Language.RU -> "Звук при точной настройке"
-        Language.UA -> "Звук при точному налаштуванні"
-        Language.EN -> "In-Tune Chime"
-    }
 }

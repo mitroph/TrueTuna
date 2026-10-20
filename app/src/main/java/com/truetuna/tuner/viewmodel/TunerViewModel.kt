@@ -4,12 +4,14 @@ import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.truetuna.tuner.audio.AudioEngine
 import com.truetuna.tuner.audio.Metronome
 import com.truetuna.tuner.audio.TonePlayer
+import com.truetuna.tuner.audio.referenceTimbre
 import com.truetuna.tuner.data.TuningRepository
 import com.truetuna.tuner.model.DisplayMode
 import com.truetuna.tuner.model.GuitarTuning
@@ -17,6 +19,7 @@ import com.truetuna.tuner.model.Instrument
 import com.truetuna.tuner.model.Language
 import com.truetuna.tuner.model.MetronomeState
 import com.truetuna.tuner.model.PitchResult
+import com.truetuna.tuner.model.StringTracker
 import com.truetuna.tuner.model.TETMode
 import com.truetuna.tuner.model.TuningMode
 import com.truetuna.tuner.model.computePitchResult
@@ -49,15 +52,13 @@ data class TunerUiState(
     val isListening: Boolean = false,
     // ── A: DSP ────────────────────────────────────────────────────────────────
     val noiseGateDbfs: Float = -55f,          // dB noise gate threshold
-    val lowPassFilterEnabled: Boolean = true,  // harmonic pre-filter
+    val lowPassFilterEnabled: Boolean = false, // harmonic pre-filter
     val isReferenceTonePlaying: Boolean = false,
     // ── B: Musical ────────────────────────────────────────────────────────────
     val capoFret: Int = 0,                     // 0 = no capo
     val metronome: MetronomeState = MetronomeState(),
     // ── C: UI/UX ──────────────────────────────────────────────────────────────
-    val displayMode: DisplayMode = DisplayMode.NEEDLE,
-    val inTuneChimeEnabled: Boolean = true,
-    val lastInTuneChimePlayed: Long = 0L      // epoch-ms guard against repeated chimes
+    val displayMode: DisplayMode = DisplayMode.NEEDLE
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +76,17 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     // Audio helpers
     private var audioEngine: AudioEngine? = null
     private val tonePlayer = TonePlayer()
+    /** Incremented on every reference-tone start so a stale "finished" callback is ignored. */
+    private var toneGeneration = 0
+    /**
+     * The microphone hears our own reference tone. Detections are ignored until this
+     * uptime (ms) so the tone (and its room echo) is not measured as the string.
+     */
+    @Volatile private var ignoreInputUntil = 0L
+    /** Auto-detect string selection with hysteresis; touched on the main thread only. */
+    private val stringTracker = StringTracker()
+    /** Last string the user was tuning; the reference tone plays it when no string is locked. */
+    private var lastTargetIndex = -1
     private val metronomeEngine = Metronome { beatIndex ->
         _uiState.update {
             it.copy(metronome = it.metronome.copy(currentBeat = beatIndex))
@@ -97,7 +109,6 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         val a4       = prefs.getFloat("a4", 440f).coerceIn(415f, 466f)
         val capo     = prefs.getInt("capo", 0).coerceIn(0, 11)
         val ngDbfs   = prefs.getFloat("noise_gate", -55f).coerceIn(-80f, -20f)
-        val chime    = prefs.getBoolean("in_tune_chime", true)
         val lp       = prefs.getBoolean("low_pass", false)
 
         val tuning   = TuningRepository.forInstrument(instrument)
@@ -114,7 +125,6 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
             selectedTuning = tuning,
             capoFret = capo,
             noiseGateDbfs = ngDbfs,
-            inTuneChimeEnabled = chime,
             lowPassFilterEnabled = lp,
             stringCentsDeviations = List(instrument.stringCount) { null }
         )
@@ -167,6 +177,10 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (!_uiState.value.isListening) return@launch
             val state = _uiState.value
+            if (state.isReferenceTonePlaying || SystemClock.uptimeMillis() < ignoreInputUntil) {
+                stringTracker.reset()
+                return@launch
+            }
             val a4 = state.a4Hz
 
             if (state.tuningMode == TuningMode.CHROMATIC) {
@@ -177,6 +191,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
 
             // ── Guitar / instrument guided mode ──────────────────────────────
             if (freq <= 0f) {
+                stringTracker.reset()
                 _uiState.update { it.copy(pitchResult = PitchResult()) }
                 return@launch
             }
@@ -190,24 +205,15 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
             val targetIndex = if (state.lockedStringIndex in strings.indices) {
                 state.lockedStringIndex
             } else {
-                strings.indices.minByOrNull { i ->
-                    abs(centsBetween(freq, strings[i].frequencyFor(a4)))
-                } ?: 0
+                stringTracker.update(freq, strings.map { it.frequencyFor(a4) })
             }
+            if (targetIndex < 0) return@launch // new note not confirmed yet
+            lastTargetIndex = targetIndex
 
             val target = strings[targetIndex]
             val cents = centsBetween(freq, target.frequencyFor(a4))
             val absDev = abs(cents)
             val inTune = absDev <= 2.5f
-
-            // In-tune chime: play once per in-tune event (guard 1 s cooldown)
-            if (inTune && state.inTuneChimeEnabled) {
-                val now = System.currentTimeMillis()
-                if (now - state.lastInTuneChimePlayed > 1000L) {
-                    tonePlayer.play(target.frequencyFor(a4) * 2f, TonePlayer.ToneMode.PLUCK)
-                    _uiState.update { it.copy(lastInTuneChimePlayed = now) }
-                }
-            }
 
             val result = PitchResult(
                 frequency = freq,
@@ -234,6 +240,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setTuningMode(mode: TuningMode) {
         prefs.edit().putString("mode", mode.name).apply()
+        stringTracker.reset()
         _uiState.update {
             it.copy(
                 tuningMode = mode,
@@ -278,15 +285,12 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(lowPassFilterEnabled = enabled) }
     }
 
-    fun setInTuneChime(enabled: Boolean) {
-        prefs.edit().putBoolean("in_tune_chime", enabled).apply()
-        _uiState.update { it.copy(inTuneChimeEnabled = enabled) }
-    }
-
     // ── Instrument & Tuning ───────────────────────────────────────────────────
 
     fun setInstrument(instrument: Instrument) {
         prefs.edit().putString("instrument", instrument.name).apply()
+        stringTracker.reset()
+        lastTargetIndex = -1
         val firstTuning = TuningRepository.forInstrument(instrument).firstOrNull()
             ?: TuningRepository.guitarPresets.first()
         _uiState.update {
@@ -303,6 +307,8 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectTuning(tuning: GuitarTuning) {
         prefs.edit().putString("tuning_${tuning.instrument.name}", tuning.name).apply()
+        stringTracker.reset()
+        lastTargetIndex = -1
         _uiState.update {
             it.copy(
                 selectedTuning = tuning,
@@ -314,6 +320,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun lockString(index: Int) {
+        stringTracker.reset()
         val currentLock = _uiState.value.lockedStringIndex
         _uiState.update { it.copy(lockedStringIndex = if (currentLock == index) -1 else index) }
     }
@@ -323,6 +330,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     fun setCapo(fret: Int) {
         val clamped = fret.coerceIn(0, 11)
         prefs.edit().putInt("capo", clamped).apply()
+        stringTracker.reset()
         _uiState.update { it.copy(capoFret = clamped, pitchResult = PitchResult()) }
     }
 
@@ -341,25 +349,46 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Reference Tone / Pitch Pipe ───────────────────────────────────────────
 
+    /**
+     * Toggle the reference note. In guided mode it plays the locked string, else the string
+     * currently being tuned, else the lowest string; in chromatic mode it plays A4. The note
+     * uses the timbre of the selected instrument.
+     */
     fun playReferenceTone() {
         val state = _uiState.value
         if (state.isReferenceTonePlaying) {
-            tonePlayer.stop()
-            _uiState.update { it.copy(isReferenceTonePlaying = false) }
+            stopReferenceTone()
             return
         }
-        val freq = if (state.lockedStringIndex >= 0) {
+        val freq = if (state.tuningMode == TuningMode.GUITAR) {
             val effectiveTuning = if (state.capoFret > 0)
                 state.selectedTuning.withCapo(state.capoFret, state.a4Hz)
             else state.selectedTuning
-            effectiveTuning.strings.getOrNull(state.lockedStringIndex)?.frequencyFor(state.a4Hz) ?: state.a4Hz
+            val index = when {
+                state.lockedStringIndex in effectiveTuning.strings.indices -> state.lockedStringIndex
+                lastTargetIndex in effectiveTuning.strings.indices -> lastTargetIndex
+                else -> 0
+            }
+            effectiveTuning.strings.getOrNull(index)?.frequencyFor(state.a4Hz) ?: state.a4Hz
         } else state.a4Hz
-        tonePlayer.play(freq, TonePlayer.ToneMode.SINE)
-        _uiState.update { it.copy(isReferenceTonePlaying = true) }
+
+        val generation = ++toneGeneration
+        _uiState.update { it.copy(isReferenceTonePlaying = true, pitchResult = PitchResult()) }
+        tonePlayer.play(freq, state.selectedInstrument.referenceTimbre) {
+            viewModelScope.launch {
+                if (generation == toneGeneration) onReferenceToneEnded()
+            }
+        }
     }
 
     fun stopReferenceTone() {
+        toneGeneration++
         tonePlayer.stop()
+        onReferenceToneEnded()
+    }
+
+    private fun onReferenceToneEnded() {
+        ignoreInputUntil = SystemClock.uptimeMillis() + TONE_ECHO_GUARD_MS
         _uiState.update { it.copy(isReferenceTonePlaying = false) }
     }
 
@@ -380,29 +409,20 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         val clamped = bpm.coerceIn(20, 300)
         val metro = _uiState.value.metronome
         _uiState.update { it.copy(metronome = metro.copy(bpm = clamped)) }
-        if (metro.isRunning) {
-            metronomeEngine.stop()
-            metronomeEngine.start(clamped, metro.beatsPerBar, metro.isSoundEnabled)
-        }
+        if (metro.isRunning) metronomeEngine.update(clamped, metro.beatsPerBar, metro.isSoundEnabled)
     }
 
     fun setMetronomeBeatsPerBar(beats: Int) {
         val valid = beats.coerceIn(2, 8)
         val metro = _uiState.value.metronome
         _uiState.update { it.copy(metronome = metro.copy(beatsPerBar = valid)) }
-        if (metro.isRunning) {
-            metronomeEngine.stop()
-            metronomeEngine.start(metro.bpm, valid, metro.isSoundEnabled)
-        }
+        if (metro.isRunning) metronomeEngine.update(metro.bpm, valid, metro.isSoundEnabled)
     }
 
     fun setMetronomeSound(enabled: Boolean) {
         val metro = _uiState.value.metronome
         _uiState.update { it.copy(metronome = metro.copy(isSoundEnabled = enabled)) }
-        if (metro.isRunning) {
-            metronomeEngine.stop()
-            metronomeEngine.start(metro.bpm, metro.beatsPerBar, enabled)
-        }
+        if (metro.isRunning) metronomeEngine.update(metro.bpm, metro.beatsPerBar, enabled)
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -412,5 +432,10 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         stopListening()
         tonePlayer.release()
         metronomeEngine.release()
+    }
+
+    private companion object {
+        /** Room echo of the reference tone can still reach the mic after playback ends. */
+        const val TONE_ECHO_GUARD_MS = 400L
     }
 }
